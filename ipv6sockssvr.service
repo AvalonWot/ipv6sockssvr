@@ -1,0 +1,13 @@
+[Unit]
+Description=Ipv6 Socks5 Proxy Server
+After=network-online.target
+
+[Service]
+Type=simple
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+DynamicUser=true
+LimitNOFILE=65535
+ExecStart=/ipv6sockssrv -l :10808 -p [your ipv6 prefix]
+
+[Install]
+WantedBy=multi-user.target
