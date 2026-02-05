@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 )
 
 type Nft struct {
@@ -18,10 +19,130 @@ func NewNft() (*Nft, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkAndInitNft(conn); err != nil {
+		return nil, err
+	}
 	return &Nft{
 		Mutex: &sync.Mutex{},
 		Conn:  conn,
 	}, nil
+}
+
+func checkAndInitNft(conn *nftables.Conn) error {
+	// Get or create table
+	table := &nftables.Table{
+		Family: nftables.TableFamilyIPv6,
+		Name:   "nat",
+	}
+
+	tables, err := conn.ListTablesOfFamily(nftables.TableFamilyIPv6)
+	if err != nil {
+		return err
+	}
+
+	tableExists := false
+	for _, t := range tables {
+		if t.Name == "nat" {
+			tableExists = true
+			table = t
+			break
+		}
+	}
+
+	if !tableExists {
+		table = conn.AddTable(table)
+	}
+
+	// Get or create chain
+	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyIPv6)
+	if err != nil {
+		return err
+	}
+
+	chainExists := false
+	var chain *nftables.Chain
+	for _, c := range chains {
+		if c.Table.Name == "nat" && c.Name == "postrouting" {
+			chainExists = true
+			chain = c
+			break
+		}
+	}
+
+	if !chainExists {
+		priority := nftables.ChainPriority(100)
+		chain = &nftables.Chain{
+			Name:     "postrouting",
+			Table:    table,
+			Type:     nftables.ChainTypeNAT,
+			Hooknum:  nftables.ChainHookPostrouting,
+			Priority: &priority,
+		}
+		conn.AddChain(chain)
+	}
+
+	// Get or create usermap set
+	sets, err := conn.GetSetByName(table, "usermap")
+	if err == nil {
+		// Set exists, flush its elements
+		conn.FlushSet(sets)
+	} else {
+		// Create new set
+		set := &nftables.Set{
+			Name:     "usermap",
+			Table:    table,
+			KeyType:  nftables.TypeMark,
+			DataType: nftables.TypeIP6Addr,
+		}
+		if err := conn.AddSet(set, nil); err != nil {
+			return err
+		}
+	}
+
+	// Check if rule exists, if not create it
+	rules, err := conn.GetRules(table, chain)
+	if err != nil {
+		return err
+	}
+
+	ruleExists := false
+	for _, r := range rules {
+		// Check if this is our SNAT rule by examining expressions
+		// This is a simplified check
+		if len(r.Exprs) > 0 {
+			for _, e := range r.Exprs {
+				if _, ok := e.(*expr.NAT); ok {
+					ruleExists = true
+					break
+				}
+			}
+		}
+	}
+
+	if !ruleExists {
+		conn.AddRule(&nftables.Rule{
+			Table: table,
+			Chain: chain,
+			Exprs: []expr.Any{
+				// meta mark
+				&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+				// lookup in usermap
+				&expr.Lookup{
+					SourceRegister: 1,
+					DestRegister:   1,
+					SetName:        "usermap",
+				},
+				// snat to
+				&expr.NAT{
+					Type:       expr.NATTypeSourceNAT,
+					Family:     uint32(nftables.TableFamilyIPv6),
+					RegAddrMin: 1,
+				},
+			},
+		})
+	}
+
+	return conn.Flush()
 }
 
 // #deploy the nft tables

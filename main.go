@@ -18,6 +18,12 @@ func main() {
 		log.Fatalf("no ipv6 prefix, use -p set")
 	}
 
+	// Ensure only one instance is running
+	if err := ensureSingleInstance(); err != nil {
+		log.Fatalf("Failed to start: %v", err)
+	}
+	defer cleanupPidFile()
+
 	srv, err := NewServer(*listenAddr, *prefix)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
